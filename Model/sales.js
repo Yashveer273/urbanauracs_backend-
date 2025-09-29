@@ -5,6 +5,7 @@ const HomeCleaningDB = require("../dbconfig/HomeCleaningDB");
 const salesSchema = new mongoose.Schema(
   {
     orderId: { type: String, required: true, index: true },
+    S_orderId: { type: Number, required: true, index: true },
     date_time: { type: Date }, // Firestore stores as ISO string, Mongoose can parse Date
     email: { type: String },
     name: { type: String },
