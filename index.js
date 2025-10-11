@@ -1,5 +1,6 @@
 const express = require("express");
-const axios = require("axios");
+
+const User=  require("./Model/user");
 const crypto = require("crypto");
 const cors = require("cors");
 const { v4: uuidv4 } = require("uuid");
@@ -38,6 +39,11 @@ const statusUrl = "http://localhost:5173/PaymentGateway/PaymentStatus";
 
 const multer = require("multer");
 const cloudinary = require("cloudinary").v2;
+const axios = require("axios");
+const https = require("https");
+// ✅ WhatsApp API Key
+const DV_API_KEY = "f6232282-6c5d-44e7-968c-b5a9a9ad039c";
+
 
 const upload = multer();
 const mediaDir = path.join(__dirname, "media");
@@ -49,6 +55,9 @@ cloudinary.config({
   api_secret: "bgoR2K04MY8CEugd8I1pVeCYQdQ",
 });
 app.post("/upload-invoice", upload.single("file"), async (req, res) => {
+    const{userId}= req.query;
+     const {  images, video, pdf } = req.body;
+    console.log(userId);
   try {
     if (!req.file) return res.status(400).json({ error: "No file uploaded" });
     if (req.file.mimetype !== "application/pdf")
@@ -57,10 +66,13 @@ app.post("/upload-invoice", upload.single("file"), async (req, res) => {
     // Ensure media folder exists
     const mediaDir = path.join(__dirname, "media");
     if (!fs.existsSync(mediaDir)) fs.mkdirSync(mediaDir);
-    console.log(req.file.originalname);
+   
     // Save PDF to media folder
     const filePath = path.join(mediaDir, req.file.originalname);
     fs.writeFileSync(filePath, req.file.buffer);
+    const msg=`Hi we are from Urban Aura \nYour Invoice: http://localhost:8000/media/${req.file.originalname}`
+
+    const data = await sendWhatsAppMessage( 8218326519, msg, images, video, pdf );
 
     res.json({
       message: "File saved locally",
@@ -73,6 +85,8 @@ app.post("/upload-invoice", upload.single("file"), async (req, res) => {
 });
 
 // app.post("/upload-invoice", upload.single("file"), async (req, res) => {
+//   const{userId}= req.query;
+//   console.log("kkkkk")
 //   try {
 //     if (!req.file) return res.status(400).json({ error: "No file uploaded" });
 //     if (req.file.mimetype !== "application/pdf")
@@ -101,6 +115,7 @@ app.post("/upload-invoice", upload.single("file"), async (req, res) => {
 
 // ---------------- CREATE ORDER ----------------
 app.post("/create-order", async (req, res) => {
+
   const { name, mobileNumber, amount, date } = req.body;
   const orderId = `TXN_${mobileNumber}_${date}`;
 
@@ -147,7 +162,7 @@ app.post("/create-order", async (req, res) => {
       status: "INITIATED",
     });
     await transaction.save();
-
+console.log(";;");
     res.status(200).json({
       msg: "OK",
       url: response.data.data.instrumentResponse.redirectInfo.url,
@@ -209,25 +224,57 @@ app.all("/redirect", async (req, res) => {
   }
 });
 
+app.post("/create-advance-order", async (req, res) => {
+  const { name, mobileNumber, amount, date } = req.body;
+  const orderId = `TXN_${mobileNumber}_${date}`;
+  try {
+    const transaction = new PaymentTransactionCollection({
+      orderId,
+      merchantId: "non",
+      merchantTransactionId: orderId,
+      payableAmount: amount,
+      payedAmount:0,
+      customerName: name,
+      mobileNumber,
+      status: "INITIATED",
+      data:{"type":"CoD"}
+    });
+    await transaction.save();
+
+    res.status(200).json({
+      msg: "OK",
+      url: `http://localhost:5173/PaymentGateway/PaymentSuccess/${orderId}/${amount}`,
+      orderId,
+    });
+  } catch (error) {
+    console.error("Error in payment:", error);
+    res.status(500).json({ error: "Failed to initiate payment" });
+  }
+});
+
 // ---------------- SAVE SALES DATA ----------------
 app.post("/api/sales/:id", async (req, res) => {
   try {
     const { id } = req.params;
     const salesData = req.body;
-
+    console.log(req.body);
+    // ✅ Safely find last S_orderId
     const lastOrder = await SalesCollection.findOne()
-      .sort({ orderId: -1 })
+      .sort({ S_orderId: -1 })
       .exec();
-    const newOrderId = lastOrder ? lastOrder.S_orderId + 1 : 1; // start from 1 if no records
-    salesData.S_orderId = newOrderId;
 
+    const lastId = lastOrder?.S_orderId || 0;
+    const newOrderId = Number.isFinite(lastId) ? lastId + 1 : 1;
+
+    salesData.S_orderId = newOrderId;
+salesData.orderId=id;
     // --- Fetch payable and payed amounts from MongoDB ---
     const transaction = await PaymentTransactionCollection.findOne({
       merchantTransactionId: id,
     });
     if (transaction) {
       salesData.payableAmount = transaction.payableAmount;
-      salesData.payedAmount = transaction.payedAmount;
+      salesData.payedAmount = transaction.payedAmount??0;
     }
 
     // --- Save to Firestore ---
@@ -237,9 +284,28 @@ app.post("/api/sales/:id", async (req, res) => {
 
     // --- Save to MongoDB ---
     const salesDoc = new SalesCollection(salesData);
+
     await salesDoc.save();
     console.log(`✅ Sales data for order ID ${id} saved to MongoDB.`);
+ const mobileNumber =
+  
+     Number(salesData.phone_number)
 
+const orderData = {
+      orderId: salesData.orderId,
+      total_price: salesData.total_price || 0,
+      payableAmount:salesData.payableAmount,
+      oGtotal_price:salesData.oGtotal_price,
+      product_info:salesData.product_info,
+      status: salesData.status,
+      date_time: salesData.date_time 
+    };
+const user = await User.findOneAndUpdate(
+      { mobileNumber },
+      { $push: { orderHistory: orderData } },
+      { new: true } // return updated document
+    );
+console.log(orderData);
     return res.status(200).json({
       message: "Sales data saved successfully in Firestore & MongoDB",
     });
@@ -249,8 +315,6 @@ app.post("/api/sales/:id", async (req, res) => {
   }
 });
 
-// Assuming you have 'express' and 'mongoose' set up, and 'SalesCollection' is defined.
-// Example: const SalesCollection = mongoose.model('Sale', saleSchema);
 
 app.post("/api/sales/addNewItemInCart", async (req, res) => {
   // 1. Destructure the required data from the request body
@@ -475,6 +539,229 @@ app.delete("/api/deleteCoupon/:id", async (req, res) => {
     res.status(500).json({ success: false, message: "Server error" });
   }
 });
+
+// POST API
+app.post("/send-whatsapp", async (req, res) => {
+  try {
+    const { mobileNumber, msg, images, video, pdf,type } = req.body;
+
+    // ✅ Validation
+    if (!mobileNumber || !/^[6-9]\d{9}$/.test(mobileNumber)) {
+      return res.status(400).json({ success: false, error: "Invalid mobile number" });
+    }
+    if (!msg) {
+      return res.status(400).json({ success: false, error: "Message is required" });
+    }
+
+    // const result = await sendWhatsAppMessage(mobileNumber, msg, images, video, pdf);
+
+   if(type==="Login") {
+const user = await User.findOne({ mobileNumber });
+
+    if (!user) {
+      return res.status(404).json({ success: false, message: "User not found." });
+    }
+
+    // Generate new JWT token
+    const token = user.token;
+     res.status(200).json({ success: true,data:msg,token});
+   }else{ res.status(200).json({ success: true,data:  msg});}
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+// ---------------- WHATSAPP MESSAGE API ----------------
+// app.post("/send-whatsapp", async (req, res) => {
+//   try {
+//     const { number, messageBody, images, video, pdf } = req.body;
+
+//     if (!number || !messageBody) {
+//       return res.status(400).json({ success: false, message: "number and messageBody are required" });
+//     }
+
+//     const url = "https://157.90.210.179/api/send-message";
+//     console.log("🔗 Sending WhatsApp to:", number);
+
+//     const response = await axios.get(url, {
+//       httpsAgent: new https.Agent({ rejectUnauthorized: false }),
+//       headers: { "api-key": DV_API_KEY },
+//       params: { "api-key": DV_API_KEY, number, messageBody, images, video, pdf },
+//     });
+
+//     console.log("🟢 WhatsApp API Response:", response.data);
+//     res.json({ success: true, data: response.data });
+//   } catch (error) {
+//     console.error("❌ WhatsApp API Error:", error.response?.data || error.message);
+//     res.status(500).json({
+//       success: false,
+//       message: "Failed to send WhatsApp message",
+//       error: error.response?.data || error.message,
+//     });
+//   }
+// });
+
+  /* ---------------- Utils ---------------- */
+ 
+ async function sendWhatsAppMessage( number, messageBody, images, video, pdf ) {
+  if (!number || !messageBody) {
+    throw new Error("number and messageBody are required");
+  }
+
+  // Ensure number is a string
+  const phoneNumber = String(number);
+
+  const url = "https://157.90.210.179/api/send-message";
+  console.log("🔗 Sending WhatsApp to:", phoneNumber);
+
+  const response = await axios.get(url, {
+    httpsAgent: new https.Agent({ rejectUnauthorized: false }),
+    headers: { "api-key": DV_API_KEY },
+    params: { "api-key": DV_API_KEY, number: phoneNumber, messageBody },
+  });
+
+  console.log("🟢 WhatsApp API Response:", response.data);
+  return response.data;
+}
+
+const SECRET_KEY = process.env.JWT_SECRET || "mysecretkey";
+
+
+// ✅ Registration API
+app.post("/register", async (req, res) => {
+  try {
+    const { username, email, mobileNumber, countryCode, location, pincode } = req.body;
+
+    if (!username || !email || !mobileNumber || !location || !pincode) {
+      return res.status(400).json({ success: false, message: "All fields are required." });
+    }
+
+    if (!/^[6-9]\d{9}$/.test(mobileNumber)) {
+      return res.status(400).json({ success: false, message: "Invalid Indian mobile number." });
+    }
+
+    // ✅ Fast lookup for either duplicate email or mobile
+    const existingUser = await User.findOne({
+      $or: [{ email }, { mobileNumber }]
+    }).select("email mobileNumber");
+
+    if (existingUser) {
+      const conflictField =
+        existingUser.email === email
+          ? "email"
+          : "mobile number";
+      return res.status(400).json({
+        success: false,
+        message: `This ${conflictField} is already registered.`,
+      });
+    }
+
+    // ✅ Fast token (no need to query DB)
+    const token = jwt.sign(
+      { mobileNumber, time: Date.now() },
+      SECRET_KEY,
+      { expiresIn: "10d" }
+    );
+
+    // ✅ Minimal write load
+    const newUser = await User.create({
+      username,
+      email,
+      mobileNumber,
+      countryCode,
+      location,
+      pincode,
+      token,
+      orderHistory: [],
+    });
+
+    res.status(201).json({
+      success: true,
+      message: "Registration successful!",
+      token,
+      data: newUser,
+    });
+  } catch (err) {
+    // ✅ Handle duplicate key gracefully (fallback safety)
+    if (err.code === 11000) {
+      const field = Object.keys(err.keyPattern)[0];
+      return res.status(400).json({
+        success: false,
+        message: `This ${field} is already registered.`,
+      });
+    }
+
+    console.error("Registration error:", err);
+    res.status(500).json({
+      success: false,
+      message: "Internal server error.",
+    });
+  }
+});
+
+
+// ✅ 2️⃣ Login API (using mobile number)
+app.post("/login", async (req, res) => {
+  try {
+    const { mobileNumber, token} = req.body;
+
+    if (!mobileNumber) {
+      return res.status(400).json({ success: false, message: "Mobile number is required." });
+    }
+
+    // Validate format
+    if (!/^[6-9]\d{9}$/.test(mobileNumber)) {
+      return res.status(400).json({ success: false, message: "Invalid 10-digit mobile number." });
+    }
+
+    // Check if user already exists
+    const user = await User.findOne({ mobileNumber });
+
+  
+
+    if (!user) {
+      return res.status(404).json({ success: false, message: "User not found." });
+    }
+if(user.token==token){
+    // Generate new JWT token
+    const token = jwt.sign({ id: user._id, mobileNumber }, SECRET_KEY, { expiresIn: "10d" });
+
+    res.json({
+      success: true,
+      message: "Login successful!",
+      token,
+      user,
+    });}else{ res.status(404).json({ success: false, message: "User not found." });}
+   
+  } catch (err) {
+    console.error("Login error:", err);
+    res.status(500).json({ success: false, message: "Server error during login." });
+  }
+});
+
+
+// ✅ 3️⃣ Token Verification API
+app.post("/verify-token", (req, res) => {
+  try {
+    const { token } = req.body;
+
+    if (!token) {
+      return res.status(400).json({ success: false, message: "Token is required." });
+    }
+
+    jwt.verify(token, SECRET_KEY, (err, decoded) => {
+      if (err) {
+        return res.status(401).json({ success: false, message: "Invalid or expired token." });
+      }
+
+      res.json({ success: true, message: "Token is valid.", data: decoded });
+    });
+  } catch (err) {
+    console.error("Token verification error:", err);
+    res.status(500).json({ success: false, message: "Server error verifying token." });
+  }
+});
+
 app.listen(8000, () => {
   console.log("Server running on http://localhost:8000");
 });
