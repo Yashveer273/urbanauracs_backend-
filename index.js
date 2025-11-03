@@ -1,9 +1,11 @@
 const express = require("express");
 
-const User=  require("./Model/user");
+const User = require("./Model/user");
 const crypto = require("crypto");
 const cors = require("cors");
 const { v4: uuidv4 } = require("uuid");
+
+const VendorRoutes = require("./routes/VendorRoutes");
 const { firestore } = require("./firebasecon"); // Correct import
 const {
   collection,
@@ -11,6 +13,10 @@ const {
   updateDoc,
   setDoc,
   doc,
+  query,
+  where,
+  getDocs,
+  arrayUnion,
 } = require("firebase/firestore");
 const PaymentTransactionCollection = require("./Model/Transection");
 const SalesCollection = require("./Model/sales");
@@ -43,8 +49,7 @@ const axios = require("axios");
 const https = require("https");
 // ✅ WhatsApp API Key
 const DV_API_KEY = "f6232282-6c5d-44e7-968c-b5a9a9ad039c";
-
-
+const {  updateSalesItem } = require("./routes/editSales");
 const upload = multer();
 const mediaDir = path.join(__dirname, "media");
 if (!fs.existsSync(mediaDir)) fs.mkdirSync(mediaDir);
@@ -55,9 +60,9 @@ cloudinary.config({
   api_secret: "bgoR2K04MY8CEugd8I1pVeCYQdQ",
 });
 app.post("/upload-invoice", upload.single("file"), async (req, res) => {
-    const{userId}= req.query;
-     const {  images, video, pdf } = req.body;
-    console.log(userId);
+  const { userId } = req.query;
+  const { images, video, pdf } = req.body;
+  console.log(userId);
   try {
     if (!req.file) return res.status(400).json({ error: "No file uploaded" });
     if (req.file.mimetype !== "application/pdf")
@@ -66,13 +71,13 @@ app.post("/upload-invoice", upload.single("file"), async (req, res) => {
     // Ensure media folder exists
     const mediaDir = path.join(__dirname, "media");
     if (!fs.existsSync(mediaDir)) fs.mkdirSync(mediaDir);
-   
+
     // Save PDF to media folder
     const filePath = path.join(mediaDir, req.file.originalname);
     fs.writeFileSync(filePath, req.file.buffer);
-    const msg=`Hi we are from Urban Aura \nYour Invoice: http://localhost:8000/media/${req.file.originalname}`
+    const msg = `Hi we are from Urban Aura \nYour Invoice: http://localhost:8000/media/${req.file.originalname}`;
 
-    const data = await sendWhatsAppMessage( 8218326519, msg, images, video, pdf );
+    const data = await sendWhatsAppMessage(userId, msg, images, video, pdf);
 
     res.json({
       message: "File saved locally",
@@ -115,7 +120,6 @@ app.post("/upload-invoice", upload.single("file"), async (req, res) => {
 
 // ---------------- CREATE ORDER ----------------
 app.post("/create-order", async (req, res) => {
-
   const { name, mobileNumber, amount, date } = req.body;
   const orderId = `TXN_${mobileNumber}_${date}`;
 
@@ -162,7 +166,7 @@ app.post("/create-order", async (req, res) => {
       status: "INITIATED",
     });
     await transaction.save();
-console.log(";;");
+    console.log(";;");
     res.status(200).json({
       msg: "OK",
       url: response.data.data.instrumentResponse.redirectInfo.url,
@@ -233,11 +237,11 @@ app.post("/create-advance-order", async (req, res) => {
       merchantId: "non",
       merchantTransactionId: orderId,
       payableAmount: amount,
-      payedAmount:0,
+      payedAmount: 0,
       customerName: name,
       mobileNumber,
       status: "INITIATED",
-      data:{"type":"CoD"}
+      data: { type: "CoD" },
     });
     await transaction.save();
 
@@ -256,7 +260,13 @@ app.post("/create-advance-order", async (req, res) => {
 app.post("/api/sales/:id", async (req, res) => {
   try {
     const { id } = req.params;
-    const salesData = req.body;
+    let salesData = req.body;
+    if (!salesData.userId) {
+      return res.status(400).json({
+        success: false,
+        message: "userId required.",
+      });
+    }
     console.log(req.body);
     // ✅ Safely find last S_orderId
     const lastOrder = await SalesCollection.findOne()
@@ -267,16 +277,40 @@ app.post("/api/sales/:id", async (req, res) => {
     const newOrderId = Number.isFinite(lastId) ? lastId + 1 : 1;
 
     salesData.S_orderId = newOrderId;
-salesData.orderId=id;
+    salesData.orderId = id;
+      const orderData = {
+      orderId: salesData.orderId,
+      total_price: salesData.total_price || 0,
+      payableAmount: salesData.payableAmount,
+      oGtotal_price: salesData.oGtotal_price,
+      product_info: salesData.product_info,
+      status: salesData.status,
+      date_time: salesData.date_time,
+      
+    };
+   const updatedUser = await User.findOneAndUpdate(
+      { _id: salesData.userId, },
+      { $push: { "orderHistory": orderData } },
+      { new: true }
+    );
+    if(!updatedUser){
+       return res.status(404).json({
+        success: false,
+        message: "User not found.",
+      });
+    }
+ 
     // --- Fetch payable and payed amounts from MongoDB ---
     const transaction = await PaymentTransactionCollection.findOne({
       merchantTransactionId: id,
     });
+    
     if (transaction) {
       salesData.payableAmount = transaction.payableAmount;
-      salesData.payedAmount = transaction.payedAmount??0;
+      salesData.payedAmount = transaction.payedAmount ?? 0;
+      salesData.ConfurmWhatsAppMobileNumber=updatedUser?.ConfurmWhatsAppMobileNumber??""
     }
-
+  
     // --- Save to Firestore ---
     const docRef = doc(firestore, "sales", id);
     await setDoc(docRef, salesData);
@@ -285,27 +319,10 @@ salesData.orderId=id;
     // --- Save to MongoDB ---
     const salesDoc = new SalesCollection(salesData);
 
+ 
     await salesDoc.save();
     console.log(`✅ Sales data for order ID ${id} saved to MongoDB.`);
- const mobileNumber =
-  
-     Number(salesData.phone_number)
 
-const orderData = {
-      orderId: salesData.orderId,
-      total_price: salesData.total_price || 0,
-      payableAmount:salesData.payableAmount,
-      oGtotal_price:salesData.oGtotal_price,
-      product_info:salesData.product_info,
-      status: salesData.status,
-      date_time: salesData.date_time 
-    };
-const user = await User.findOneAndUpdate(
-      { mobileNumber },
-      { $push: { orderHistory: orderData } },
-      { new: true } // return updated document
-    );
-console.log(orderData);
     return res.status(200).json({
       message: "Sales data saved successfully in Firestore & MongoDB",
     });
@@ -315,10 +332,10 @@ console.log(orderData);
   }
 });
 
-
-app.post("/api/sales/addNewItemInCart", async (req, res) => {
+app.post("/sales/addNewItemInCart", async (req, res) => {
+  console.log(req.body)
   // 1. Destructure the required data from the request body
-  const { S_orderId, newCartItem } = req.body;
+  const { S_orderId, newCartItem,userId,id } = req.body;
 
   // 2. Input validation
   if (!S_orderId || !newCartItem) {
@@ -329,11 +346,37 @@ app.post("/api/sales/addNewItemInCart", async (req, res) => {
   }
 
   try {
+    // 2️⃣ Find sale data to locate the user + orderId
+    const saleData = await SalesCollection.findOne({ S_orderId });
+    if (!saleData) {
+      return res.status(404).json({
+        success: false,
+        message: "Sale not found for this S_orderId.",
+      });
+    }
+
+    // Extract data from sale
+    const {  orderId } = saleData;
+
+    // 3️⃣ Update existing user's orderHistory -> product_info.cart
+    const updatedUser = await User.findOneAndUpdate(
+      { _id: userId, "orderHistory.orderId": orderId },
+      { $push: { "orderHistory.$.product_info.cart": newCartItem } },
+      { new: true }
+    );
+      if (!updatedUser) {
+      console.log("No document found with S_orderId:", S_orderId);
+      return res.status(404).json({
+        success: false,
+        message: `Order with ID ${S_orderId} not found.`,
+      });
+    }
     const updatedDoc = await SalesCollection.findOneAndUpdate(
       { S_orderId: S_orderId },
       { $push: { "product_info.cart": newCartItem } },
       { new: true }
     );
+
     if (!updatedDoc) {
       console.log("No document found with S_orderId:", S_orderId);
       return res.status(404).json({
@@ -341,7 +384,8 @@ app.post("/api/sales/addNewItemInCart", async (req, res) => {
         message: `Order with ID ${S_orderId} not found.`,
       });
     }
-    const docRef = doc(firestore, "sales", S_orderId);
+  
+    const docRef = doc(firestore, "sales",id);
     await updateDoc(docRef, {
       "product_info.cart": arrayUnion(newCartItem),
     });
@@ -361,6 +405,86 @@ app.post("/api/sales/addNewItemInCart", async (req, res) => {
     });
   }
 });
+
+app.put("/update/SalesData/:orderId", async (req, res) => {
+  try {
+    const { orderId } = req.params;
+    const {
+      name,
+      email,
+      phone_number,
+      ConfurmWhatsAppMobileNumber,
+      pincode,
+      user_location,
+      total_price,
+      payableAmount,
+      payedAmount,
+      date_time,
+    } = req.body;
+
+    // Validate that at least one field is provided
+    if (
+      !name &&
+      !email &&
+      !phone_number &&
+      !ConfurmWhatsAppMobileNumber &&
+      !pincode &&
+      !user_location &&
+      !total_price &&
+      !payableAmount &&
+      !payedAmount &&
+      !date_time
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "No fields provided for update.",
+      });
+    }
+
+    // Prepare update data (only include provided fields)
+    const updateData = {};
+    if (name) updateData.name = name;
+    if (email) updateData.email = email;
+    if (phone_number) updateData.phone_number = phone_number;
+    if (ConfurmWhatsAppMobileNumber)
+      updateData.ConfurmWhatsAppMobileNumber = ConfurmWhatsAppMobileNumber;
+    if (pincode) updateData.pincode = pincode;
+    if (user_location) updateData.user_location = user_location;
+    if (total_price) updateData.total_price = total_price;
+    if (payableAmount) updateData.payableAmount = Number(payableAmount);
+    if (payedAmount) updateData.payedAmount = Number(payedAmount);
+    if (date_time) updateData.date_time = new Date(date_time);
+
+    // Update MongoDB record
+    const updatedSale = await SalesCollection.findOneAndUpdate(
+      { orderId }, // match by orderId
+      { $set: updateData },
+      { new: true, runValidators: true }
+    );
+
+    if (!updatedSale) {
+      console.log(updatedSale);
+      return res.status(404).json({
+        success: false,
+        message: `Sale with orderId ${orderId} not found.`,
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: "Sale updated successfully.",
+      data: updatedSale,
+    });
+  } catch (error) {
+    console.error("Error updating sale:", error);
+    res.status(500).json({
+      success: false,
+      message: "Server error while updating sale.",
+      error: error.message,
+    });
+  }
+});
+
 app.post("/api/create-dashAuth", async (req, res) => {
   try {
     const { id, pass, tagAccess } = req.body;
@@ -540,70 +664,141 @@ app.delete("/api/deleteCoupon/:id", async (req, res) => {
   }
 });
 
-// POST API
-app.post("/send-whatsapp", async (req, res) => {
+app.post("/send-Opt-On-Number", async (req, res) => {
   try {
-    const { mobileNumber, msg, images, video, pdf,type } = req.body;
+    const { mobileNumber, msg, images, video, pdf, type } = req.body;
 
     // ✅ Validation
     if (!mobileNumber || !/^[6-9]\d{9}$/.test(mobileNumber)) {
-      return res.status(400).json({ success: false, error: "Invalid mobile number" });
+      return res
+        .status(400)
+        .json({ success: false, error: "Invalid mobile number" });
     }
     if (!msg) {
-      return res.status(400).json({ success: false, error: "Message is required" });
+      return res
+        .status(400)
+        .json({ success: false, error: "Message is required" });
     }
 
     // const result = await sendWhatsAppMessage(mobileNumber, msg, images, video, pdf);
+    // let otp = randomNumber(100000, 999999);
 
-   if(type==="Login") {
-const user = await User.findOne({ mobileNumber });
+    if (type === "Login") {
+      let user = await User.findOne({ mobileNumber });
+      if (user) {
+        const usersRef = collection(firestore, "User");
+        const q = query(usersRef, where("mobileNumber", "==", mobileNumber));
+        const snap = await getDocs(q);
 
-    if (!user) {
-      return res.status(404).json({ success: false, message: "User not found." });
+        if (!snap.empty) {
+          const firestoreUser = snap.docs[0].data();
+          console.log("User found in Firestore:", firestoreUser);
+          user = firestoreUser;
+        } else {
+          user = null;
+        }
+      }
+      if (!user) {
+        return res
+          .status(404)
+          .json({ success: false, message: `User not found.` });
+      }
+      let otpResult = await sendOtpLess(mobileNumber, msg);
+      console.log(otpResult);
+
+      if (!otpResult.success) {
+        return res
+          .status(500)
+          .json({ success: false, message: otpResult?.data?.message[0] });
+      }
+      // Generate new JWT token
+      const token = user.token;
+      res.status(200).json({ success: true, data: msg, token, otpResult });
+    } else {
+      let user = await User.findOne({ mobileNumber });
+      if (user) {
+        return res.status(404).json({
+          success: false,
+          message: `${mobileNumber} is already registered.`,
+        });
+      }
+      if (!user) {
+        const usersRef = collection(firestore, "User");
+        const q = query(usersRef, where("mobileNumber", "==", mobileNumber));
+        const snap = await getDocs(q);
+
+        if (!snap.empty) {
+          // ✅ Firestore user found
+          const firestoreUser = snap.docs[0].data();
+          console.log("User found in Firestore:", firestoreUser);
+          user = firestoreUser;
+          if (firestoreUser) {
+            return res.status(404).json({
+              success: false,
+              message: `${mobileNumber} is already registered.`,
+            });
+          }
+        }
+      }
+
+      let otpResult = await sendOtpLess(mobileNumber, msg);
+      console.log(otpResult);
+
+      if (!otpResult.success) {
+        return res
+          .status(500)
+          .json({ success: false, message: otpResult?.data?.message[0] });
+      }
+      res.status(200).json({ success: true, data: msg, otpResult });
     }
-
-    // Generate new JWT token
-    const token = user.token;
-     res.status(200).json({ success: true,data:msg,token});
-   }else{ res.status(200).json({ success: true,data:  msg});}
   } catch (err) {
     console.error(err);
     res.status(500).json({ success: false, error: "Internal server error" });
   }
 });
 // ---------------- WHATSAPP MESSAGE API ----------------
-// app.post("/send-whatsapp", async (req, res) => {
-//   try {
-//     const { number, messageBody, images, video, pdf } = req.body;
+app.post("/send-whatsapp", async (req, res) => {
+  try {
+    const { mobileNumber, messageBody, images, video, pdf } = req.body;
 
-//     if (!number || !messageBody) {
-//       return res.status(400).json({ success: false, message: "number and messageBody are required" });
-//     }
+    if (!number || !messageBody) {
+      return res
+        .status(400)
+        .json({
+          success: false,
+          message: "number and messageBody are required",
+        });
+    }
 
-//     const url = "https://157.90.210.179/api/send-message";
-//     console.log("🔗 Sending WhatsApp to:", number);
+    const url = "https://157.90.210.179/api/send-message";
+    console.log("🔗 Sending WhatsApp to:", mobileNumber);
 
-//     const response = await axios.get(url, {
-//       httpsAgent: new https.Agent({ rejectUnauthorized: false }),
-//       headers: { "api-key": DV_API_KEY },
-//       params: { "api-key": DV_API_KEY, number, messageBody, images, video, pdf },
-//     });
+    const result = await sendWhatsAppMessage(
+      mobileNumber,
+      msg,
+      images,
+      video,
+      pdf
+    );
 
-//     console.log("🟢 WhatsApp API Response:", response.data);
-//     res.json({ success: true, data: response.data });
-//   } catch (error) {
-//     console.error("❌ WhatsApp API Error:", error.response?.data || error.message);
-//     res.status(500).json({
-//       success: false,
-//       message: "Failed to send WhatsApp message",
-//       error: error.response?.data || error.message,
-//     });
-//   }
-// });
+    console.log("🟢 WhatsApp API Response:", result);
+    res.json({ success: true, data: result });
+  } catch (error) {
+    console.error(
+      "❌ WhatsApp API Error:",
+      error.response?.data || error.message
+    );
+    res.status(500).json({
+      success: false,
+      message: "Failed to send WhatsApp message",
+      error: error.response?.data || error.message,
+    });
+  }
+});
 
-  /* ---------------- Utils ---------------- */
- 
- async function sendWhatsAppMessage( number, messageBody, images, video, pdf ) {
+/* ---------------- Utils ---------------- */
+
+async function sendWhatsAppMessage(number, messageBody, images, video, pdf) {
   if (!number || !messageBody) {
     throw new Error("number and messageBody are required");
   }
@@ -624,57 +819,114 @@ const user = await User.findOne({ mobileNumber });
   return response.data;
 }
 
-const SECRET_KEY = process.env.JWT_SECRET || "mysecretkey";
+const sendOtpLess = async (phoneNo, otp) => {
+  try {
+    const dv_key = "1pULP3Aj0i"; // 🔹 Replace with your actual API key
+    const url = `https://dvhosting.in/api-sms-v3.php?api_key=${dv_key}&number=${phoneNo}&otp=${otp}`;
 
+    const response = await fetch(url, {
+      method: "GET",
+      agent: new (require("https").Agent)({ rejectUnauthorized: false }), // disable SSL verification (like PHP)
+    });
+
+    const data = await response.json(); // response may be plain text, not JSON
+    console.log("✅ OTP Send Response:", data);
+
+    return { success: data.return, data, otp };
+  } catch (error) {
+    console.error("❌ Error sending OTP:", error);
+    return { success: false, message: error.message };
+  }
+};
+
+const SECRET_KEY = process.env.JWT_SECRET || "mysecretkey";
 
 // ✅ Registration API
 app.post("/register", async (req, res) => {
   try {
-    const { username, email, mobileNumber, countryCode, location, pincode } = req.body;
+    const { username, email, mobileNumber, location, pincode, phoneType } =
+      req.body;
 
-    if (!username || !email || !mobileNumber || !location || !pincode) {
-      return res.status(400).json({ success: false, message: "All fields are required." });
+    if (
+      !username ||
+      !email ||
+      !mobileNumber ||
+      !location ||
+      !pincode ||
+      !phoneType
+    ) {
+      return res
+        .status(400)
+        .json({ success: false, message: "All fields are required." });
     }
 
     if (!/^[6-9]\d{9}$/.test(mobileNumber)) {
-      return res.status(400).json({ success: false, message: "Invalid Indian mobile number." });
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid Indian mobile number." });
     }
 
-    // ✅ Fast lookup for either duplicate email or mobile
+    // 🔹 Check duplicate in MongoDB
     const existingUser = await User.findOne({
-      $or: [{ email }, { mobileNumber }]
+      $or: [{ email }, { mobileNumber }],
     }).select("email mobileNumber");
 
     if (existingUser) {
       const conflictField =
-        existingUser.email === email
-          ? "email"
-          : "mobile number";
+        existingUser.email === email ? "email" : "mobile number";
       return res.status(400).json({
         success: false,
         message: `This ${conflictField} is already registered.`,
       });
     }
 
-    // ✅ Fast token (no need to query DB)
-    const token = jwt.sign(
-      { mobileNumber, time: Date.now() },
-      SECRET_KEY,
-      { expiresIn: "10d" }
-    );
+    // 🔹 Check duplicate in Firestore
+    const usersRef = collection(firestore, "User");
 
-    // ✅ Minimal write load
-    const newUser = await User.create({
+    const [emailSnap, mobileSnap] = await Promise.all([
+      getDocs(query(usersRef, where("email", "==", email))),
+      getDocs(query(usersRef, where("mobileNumber", "==", mobileNumber))),
+    ]);
+
+    if (!emailSnap.empty) {
+      return res.status(400).json({
+        success: false,
+        message: "This email is already registered in Firestore.",
+      });
+    }
+
+    if (!mobileSnap.empty) {
+      return res.status(400).json({
+        success: false,
+        message: "This mobile number is already registered in Firestore.",
+      });
+    }
+
+    // ✅ Fast token (no need to query DB)
+    const token = jwt.sign({ mobileNumber, time: Date.now() }, SECRET_KEY, {
+      expiresIn: "10d",
+    });
+    let payload = {
       username,
+      phoneType,
       email,
       mobileNumber,
-      countryCode,
+      countryCode: "+91",
       location,
       pincode,
       token,
       orderHistory: [],
-    });
+      ConfurmWhatsAppMobileNumber: phoneType == "whatsapp" ? mobileNumber : "",
+    };
+    console.log(payload);
+    // ✅ Minimal write load
+    const newUser = await User.create(payload);
 
+    payload._id = newUser._id.toString();
+    payload.created = new Date();
+    console.log(payload);
+    const docRef = doc(firestore, "User", mobileNumber);
+    await setDoc(docRef, payload);
     res.status(201).json({
       success: true,
       message: "Registration successful!",
@@ -699,46 +951,54 @@ app.post("/register", async (req, res) => {
   }
 });
 
-
 // ✅ 2️⃣ Login API (using mobile number)
 app.post("/login", async (req, res) => {
   try {
-    const { mobileNumber, token} = req.body;
+    const { mobileNumber, token } = req.body;
 
     if (!mobileNumber) {
-      return res.status(400).json({ success: false, message: "Mobile number is required." });
+      return res
+        .status(400)
+        .json({ success: false, message: "Mobile number is required." });
     }
 
     // Validate format
     if (!/^[6-9]\d{9}$/.test(mobileNumber)) {
-      return res.status(400).json({ success: false, message: "Invalid 10-digit mobile number." });
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid 10-digit mobile number." });
     }
 
     // Check if user already exists
     const user = await User.findOne({ mobileNumber });
-
-  
-
+    console.log(user);
     if (!user) {
-      return res.status(404).json({ success: false, message: "User not found." });
+      return res
+        .status(404)
+        .json({ success: false, message: "User not found." });
     }
-if(user.token==token){
-    // Generate new JWT token
-    const token = jwt.sign({ id: user._id, mobileNumber }, SECRET_KEY, { expiresIn: "10d" });
+    if (user.token == token) {
+      // Generate new JWT token
+      const token = jwt.sign({ id: user._id, mobileNumber }, SECRET_KEY, {
+        expiresIn: "10d",
+      });
 
-    res.json({
-      success: true,
-      message: "Login successful!",
-      token,
-      user,
-    });}else{ res.status(404).json({ success: false, message: "User not found." });}
-   
+      res.json({
+        success: true,
+        message: "Login successful!",
+        token,
+        user,
+      });
+    } else {
+      res.status(404).json({ success: false, message: "User not found." });
+    }
   } catch (err) {
     console.error("Login error:", err);
-    res.status(500).json({ success: false, message: "Server error during login." });
+    res
+      .status(500)
+      .json({ success: false, message: "Server error during login." });
   }
 });
-
 
 // ✅ 3️⃣ Token Verification API
 app.post("/verify-token", (req, res) => {
@@ -746,22 +1006,93 @@ app.post("/verify-token", (req, res) => {
     const { token } = req.body;
 
     if (!token) {
-      return res.status(400).json({ success: false, message: "Token is required." });
+      return res
+        .status(400)
+        .json({ success: false, message: "Token is required." });
     }
 
     jwt.verify(token, SECRET_KEY, (err, decoded) => {
       if (err) {
-        return res.status(401).json({ success: false, message: "Invalid or expired token." });
+        return res
+          .status(401)
+          .json({ success: false, message: "Invalid or expired token." });
       }
 
       res.json({ success: true, message: "Token is valid.", data: decoded });
     });
   } catch (err) {
     console.error("Token verification error:", err);
-    res.status(500).json({ success: false, message: "Server error verifying token." });
+    res
+      .status(500)
+      .json({ success: false, message: "Server error verifying token." });
   }
 });
 
+app.put("/update/:id", async (req, res) => {
+  try {
+    const { userId } = req.params; // current (old) mobile number
+    const { mobileNumber, phoneType } = req.body;
+
+    // Validate inputs
+    if (!mobileNumber && !phoneType) {
+      return res.status(400).json({
+        success: false,
+        message: "Please provide mobileNumber or phoneType to update.",
+      });
+    }
+    // Find existing user by old mobile number
+    const user = await User.findOne(userId);
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found with this mobile number.",
+      });
+    }
+
+    // Generate new token based on updated number
+    const token = jwt.sign({ mobileNumber, time: Date.now() }, SECRET_KEY, {
+      expiresIn: "10d",
+    });
+
+    const updateData = {
+      token,
+    };
+    if (mobileNumber) {
+      updateData.ConfurmWhatsAppMobileNumber = mobileNumber;
+    }
+
+    if (phoneType) {
+      updateData.phoneType = phoneType;
+    }
+
+    // Update the user
+    const updatedUser = await User.findOneAndUpdate(
+      userId,
+      { $set: updateData },
+      { new: true, runValidators: true }
+    );
+    // --- Update Firestore ---
+    const firestoreId = updatedUser.mobileNumber.toString();
+    const userRef = doc(firestore, "User", firestoreId);
+    const updatedUser2 = await updateDoc(userRef, updateData);
+    console.log(updatedUser, updatedUser2);
+    res.status(200).json({
+      success: true,
+      message: "User updated successfully.",
+      user: updatedUser,
+    });
+  } catch (error) {
+    console.error("Update error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Server error.",
+      error: error.message,
+    });
+  }
+});
+
+app.use("/api/vendors", VendorRoutes);
+app.put("/editSalesItem/:saleId/cart", updateSalesItem);
 app.listen(8000, () => {
   console.log("Server running on http://localhost:8000");
 });
