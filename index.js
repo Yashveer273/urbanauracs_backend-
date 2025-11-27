@@ -49,7 +49,7 @@ const axios = require("axios");
 const https = require("https");
 // ✅ WhatsApp API Key
 const DV_API_KEY = "f6232282-6c5d-44e7-968c-b5a9a9ad039c";
-const {  updateSalesItem } = require("./routes/editSales");
+const { updateSalesItem } = require("./routes/editSales");
 const upload = multer();
 const mediaDir = path.join(__dirname, "media");
 if (!fs.existsSync(mediaDir)) fs.mkdirSync(mediaDir);
@@ -120,14 +120,22 @@ app.post("/upload-invoice", upload.single("file"), async (req, res) => {
 
 // ---------------- CREATE ORDER ----------------
 app.post("/create-order", async (req, res) => {
-  const { name, mobileNumber, amount, date } = req.body;
+  const {
+    name,
+    mobileNumber,
+    advance,
+    date,
+    left_amount,
+    oGtotal_price,
+    total_price,
+  } = req.body;
   const orderId = `TXN_${mobileNumber}_${date}`;
 
   const paymentPayload = {
     merchantId: MERCHANT_ID,
     merchantUserId: name,
     mobileNumber: mobileNumber,
-    amount: amount * 100,
+    amount: advance * 100,
     merchantTransactionId: orderId,
     redirectUrl: `${redirectUrl}/?id=${orderId}`,
     redirectMode: "REDIRECT",
@@ -160,13 +168,16 @@ app.post("/create-order", async (req, res) => {
       orderId,
       merchantId: MERCHANT_ID,
       merchantTransactionId: orderId,
-      payableAmount: amount,
+      payableAmount: left_amount,
+      payedAmount: advance,
       customerName: name,
+      total_price,
+      oGtotal_price,
       mobileNumber,
       status: "INITIATED",
     });
     await transaction.save();
-    console.log(";;");
+
     res.status(200).json({
       msg: "OK",
       url: response.data.data.instrumentResponse.redirectInfo.url,
@@ -180,6 +191,7 @@ app.post("/create-order", async (req, res) => {
 
 // ---------------- REDIRECT HANDLER ----------------
 app.all("/redirect", async (req, res) => {
+  // https://developer.phonepe.com/payment-gateway/uat-testing-go-live/uat-sandbox
   const merchantTransactionId = req.query.id;
 
   const keyIndex = 1;
@@ -227,17 +239,28 @@ app.all("/redirect", async (req, res) => {
     res.redirect(`${failureUrl}/${merchantTransactionId}/0`);
   }
 });
-
-app.post("/create-advance-order", async (req, res) => {
-  const { name, mobileNumber, amount, date } = req.body;
+//CoD
+app.post("/create-case-on-delivery", async (req, res) => {
+  const {
+    name,
+    mobileNumber,
+    advance,
+    date,
+    left_amount,
+    oGtotal_price,
+    total_price,
+  } = req.body;
   const orderId = `TXN_${mobileNumber}_${date}`;
+  const amount = advance;
   try {
     const transaction = new PaymentTransactionCollection({
       orderId,
       merchantId: "non",
       merchantTransactionId: orderId,
-      payableAmount: amount,
+      payableAmount: left_amount,
       payedAmount: 0,
+      oGtotal_price,
+      total_price,
       customerName: name,
       mobileNumber,
       status: "INITIATED",
@@ -261,13 +284,14 @@ app.post("/api/sales/:id", async (req, res) => {
   try {
     const { id } = req.params;
     let salesData = req.body;
+
     if (!salesData.userId) {
       return res.status(400).json({
         success: false,
         message: "userId required.",
       });
     }
-    console.log(req.body);
+
     // ✅ Safely find last S_orderId
     const lastOrder = await SalesCollection.findOne()
       .sort({ S_orderId: -1 })
@@ -278,39 +302,40 @@ app.post("/api/sales/:id", async (req, res) => {
 
     salesData.S_orderId = newOrderId;
     salesData.orderId = id;
-      const orderData = {
+    const orderData = {
       orderId: salesData.orderId,
-      total_price: salesData.total_price || 0,
-      payableAmount: salesData.payableAmount,
       oGtotal_price: salesData.oGtotal_price,
+      total_price: salesData.total_price || 0,
+      payableAmount: salesData.left_amount,
+      payedAmount: salesData.advance,
       product_info: salesData.product_info,
       status: salesData.status,
       date_time: salesData.date_time,
-      
     };
-   const updatedUser = await User.findOneAndUpdate(
-      { _id: salesData.userId, },
-      { $push: { "orderHistory": orderData } },
+    const updatedUser = await User.findOneAndUpdate(
+      { _id: salesData.userId },
+      { $push: { orderHistory: orderData } },
       { new: true }
     );
-    if(!updatedUser){
-       return res.status(404).json({
+    if (!updatedUser) {
+      return res.status(404).json({
         success: false,
         message: "User not found.",
       });
     }
- 
+
     // --- Fetch payable and payed amounts from MongoDB ---
     const transaction = await PaymentTransactionCollection.findOne({
       merchantTransactionId: id,
     });
-    
+
     if (transaction) {
       salesData.payableAmount = transaction.payableAmount;
       salesData.payedAmount = transaction.payedAmount ?? 0;
-      salesData.ConfurmWhatsAppMobileNumber=updatedUser?.ConfurmWhatsAppMobileNumber??""
+      salesData.ConfurmWhatsAppMobileNumber =
+        updatedUser?.ConfurmWhatsAppMobileNumber ?? "";
     }
-  
+
     // --- Save to Firestore ---
     const docRef = doc(firestore, "sales", id);
     await setDoc(docRef, salesData);
@@ -319,7 +344,6 @@ app.post("/api/sales/:id", async (req, res) => {
     // --- Save to MongoDB ---
     const salesDoc = new SalesCollection(salesData);
 
- 
     await salesDoc.save();
     console.log(`✅ Sales data for order ID ${id} saved to MongoDB.`);
 
@@ -333,9 +357,9 @@ app.post("/api/sales/:id", async (req, res) => {
 });
 
 app.post("/sales/addNewItemInCart", async (req, res) => {
-  console.log(req.body)
+  console.log(req.body);
   // 1. Destructure the required data from the request body
-  const { S_orderId, newCartItem,userId,id } = req.body;
+  const { S_orderId, newCartItem, userId, id } = req.body;
 
   // 2. Input validation
   if (!S_orderId || !newCartItem) {
@@ -356,7 +380,7 @@ app.post("/sales/addNewItemInCart", async (req, res) => {
     }
 
     // Extract data from sale
-    const {  orderId } = saleData;
+    const { orderId } = saleData;
 
     // 3️⃣ Update existing user's orderHistory -> product_info.cart
     const updatedUser = await User.findOneAndUpdate(
@@ -364,7 +388,7 @@ app.post("/sales/addNewItemInCart", async (req, res) => {
       { $push: { "orderHistory.$.product_info.cart": newCartItem } },
       { new: true }
     );
-      if (!updatedUser) {
+    if (!updatedUser) {
       console.log("No document found with S_orderId:", S_orderId);
       return res.status(404).json({
         success: false,
@@ -384,8 +408,8 @@ app.post("/sales/addNewItemInCart", async (req, res) => {
         message: `Order with ID ${S_orderId} not found.`,
       });
     }
-  
-    const docRef = doc(firestore, "sales",id);
+
+    const docRef = doc(firestore, "sales", id);
     await updateDoc(docRef, {
       "product_info.cart": arrayUnion(newCartItem),
     });
@@ -484,6 +508,39 @@ app.put("/update/SalesData/:orderId", async (req, res) => {
     });
   }
 });
+
+// get My order history 
+app.get("/order-history/:userId", async (req, res) => {
+  try {
+    const page = Number(req.query.page) || 1;
+    const limit = Number(req.query.limit) || 10;
+    const skip = (page - 1) * limit;
+
+    const user = await User.findById(
+      req.params.userId,
+      { orderHistory: { $slice: [-skip - limit, limit] } }
+    );
+
+    if (!user)
+      return res.status(404).json({ success: false, message: "User not found" });
+
+    const total = user.orderHistory.length;
+
+    res.json({
+      success: true,
+      page,
+      limit,
+      total,
+      totalPages: Math.ceil(total / limit),
+      orders: user.orderHistory.reverse()
+    });
+
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+
 
 app.post("/api/create-dashAuth", async (req, res) => {
   try {
@@ -762,12 +819,10 @@ app.post("/send-whatsapp", async (req, res) => {
     const { mobileNumber, messageBody, images, video, pdf } = req.body;
 
     if (!number || !messageBody) {
-      return res
-        .status(400)
-        .json({
-          success: false,
-          message: "number and messageBody are required",
-        });
+      return res.status(400).json({
+        success: false,
+        message: "number and messageBody are required",
+      });
     }
 
     const url = "https://157.90.210.179/api/send-message";
@@ -902,10 +957,6 @@ app.post("/register", async (req, res) => {
       });
     }
 
-    // ✅ Fast token (no need to query DB)
-    const token = jwt.sign({ mobileNumber, time: Date.now() }, SECRET_KEY, {
-      expiresIn: "10d",
-    });
     let payload = {
       username,
       phoneType,
@@ -914,17 +965,19 @@ app.post("/register", async (req, res) => {
       countryCode: "+91",
       location,
       pincode,
-      token,
+
       orderHistory: [],
       ConfurmWhatsAppMobileNumber: phoneType == "whatsapp" ? mobileNumber : "",
     };
     console.log(payload);
     // ✅ Minimal write load
     const newUser = await User.create(payload);
-
+    const token = jwt.sign({ id: newUser._id, mobileNumber }, SECRET_KEY, {
+      expiresIn: "10d",
+    });
     payload._id = newUser._id.toString();
     payload.created = new Date();
-    console.log(payload);
+
     const docRef = doc(firestore, "User", mobileNumber);
     await setDoc(docRef, payload);
     res.status(201).json({
@@ -954,7 +1007,7 @@ app.post("/register", async (req, res) => {
 // ✅ 2️⃣ Login API (using mobile number)
 app.post("/login", async (req, res) => {
   try {
-    const { mobileNumber, token } = req.body;
+    const { mobileNumber } = req.body;
 
     if (!mobileNumber) {
       return res
@@ -971,27 +1024,24 @@ app.post("/login", async (req, res) => {
 
     // Check if user already exists
     const user = await User.findOne({ mobileNumber });
-    console.log(user);
+
     if (!user) {
       return res
         .status(404)
         .json({ success: false, message: "User not found." });
     }
-    if (user.token == token) {
-      // Generate new JWT token
-      const token = jwt.sign({ id: user._id, mobileNumber }, SECRET_KEY, {
-        expiresIn: "10d",
-      });
 
-      res.json({
-        success: true,
-        message: "Login successful!",
-        token,
-        user,
-      });
-    } else {
-      res.status(404).json({ success: false, message: "User not found." });
-    }
+    // Generate new JWT token
+    const token = jwt.sign({ id: user._id, mobileNumber }, SECRET_KEY, {
+      expiresIn: "10d",
+    });
+
+    res.json({
+      success: true,
+      message: "Login successful!",
+      token,
+      user,
+    });
   } catch (err) {
     console.error("Login error:", err);
     res
@@ -1013,6 +1063,7 @@ app.post("/verify-token", (req, res) => {
 
     jwt.verify(token, SECRET_KEY, (err, decoded) => {
       if (err) {
+        console.log("....", err);
         return res
           .status(401)
           .json({ success: false, message: "Invalid or expired token." });

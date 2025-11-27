@@ -8,10 +8,12 @@ const transactionSchema = new mongoose.Schema(
     merchantTransactionId: { type: String, unique: true },
     customerName: { type: String },
     mobileNumber: { type: String },
-    payableAmount: { type: Number },  // initial amount
-    payedAmount: { type: Number },    // actual paid amount
-    status: { type: String },         // INITIATED, PAYMENT_SUCCESS, etc.
-    data: { type: Object },           // full PhonePe response
+    total_price:{ type: String },
+    oGtotal_price:{ type: String },
+    payableAmount: { type: Number },
+    payedAmount: { type: Number },
+    status: { type: String },
+    data: { type: Object },
   },
   { timestamps: true }
 );

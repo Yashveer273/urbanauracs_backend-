@@ -10,7 +10,7 @@ const userSchema = new mongoose.Schema(
     countryCode: { type: String, default: "+91" },
     location: { type: String, required: true },
     pincode: { type: String, required: true },
-    token:{ type: String, required: true },
+ 
     orderHistory: { type: Object, },
 
   },
